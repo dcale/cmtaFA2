@@ -114,21 +114,21 @@ class LedgerKey:
     """Ledger key used when looking up balances"""
     def get_type():
         """Returns a single ledger key type, layouted"""
-        return sp.TRecord(token_id = sp.TNat, owner = sp.TAddress).layout(("token_id", "owner"))
+        return sp.TRecord(owner = sp.TAddress, token_id = sp.TNat).layout(("owner", "token_id"))
         
-    def make(token_id, owner):
+    def make(owner, token_id):
         """Creates a typed ledger key"""
-        return sp.set_type_expr(sp.record(token_id = token_id, owner = owner), LedgerKey.get_type())
+        return sp.set_type_expr(sp.record(owner = owner, token_id = token_id), LedgerKey.get_type())
 
 class OperatorKey:
     """Operator key used when looking up operation permissions"""
     def get_type():
         """Returns a single operator key type, layouted"""
-        return sp.TRecord(token_id = sp.TNat, owner = sp.TAddress, operator = sp.TAddress ).layout(("token_id", ("owner", "operator")))
+        return sp.TRecord(owner = sp.TAddress, operator = sp.TAddress, token_id = sp.TNat).layout(("owner", ("operator", "token_id")))
         
-    def make(token_id, owner, operator):
+    def make(owner, operator, token_id):
         """Creates a typed operator key"""
-        return sp.set_type_expr(sp.record(token_id = token_id, owner = owner, operator = operator), OperatorKey.get_type())
+        return sp.set_type_expr(sp.record(owner = owner, operator = operator, token_id = token_id), OperatorKey.get_type())
 
 
 class BaseFA2(sp.Contract):
@@ -152,9 +152,9 @@ class BaseFA2(sp.Contract):
         sp.set_type(transfers, Transfer.get_batch_type())
         sp.for transfer in transfers:
             sp.for tx in transfer.txs:
-                from_user = LedgerKey.make(tx.token_id, transfer.from_)
-                to_user = LedgerKey.make(tx.token_id, tx.to_)
-                operator_key = OperatorKey.make(tx.token_id, transfer.from_, sp.sender)
+                from_user = LedgerKey.make(transfer.from_, tx.token_id)
+                to_user = LedgerKey.make(tx.to_, tx.token_id)
+                operator_key = OperatorKey.make(transfer.from_, sp.sender, tx.token_id)
 
                 sp.verify(self.data.ledger.get(from_user,sp.nat(0)) >= tx.amount, message = FA2ErrorMessage.INSUFFICIENT_BALANCE)                                     
                 sp.verify((sp.sender == transfer.from_) | self.data.operators.get(operator_key, False), message=FA2ErrorMessage.NOT_OWNER)
@@ -176,11 +176,11 @@ class BaseFA2(sp.Contract):
             with update_operator.match_cases() as argument:
                 with argument.match("add_operator") as update:
                     sp.verify(update.owner == sp.sender, message=FA2ErrorMessage.NOT_OWNER)
-                    operator_key = OperatorKey.make(update.token_id, update.owner, update.operator)
+                    operator_key = OperatorKey.make(update.owner, update.operator, update.token_id)
                     self.data.operators[operator_key] = True
                 with argument.match("remove_operator") as update:
                     sp.verify(update.owner == sp.sender, message=FA2ErrorMessage.NOT_OWNER)
-                    operator_key = OperatorKey.make(update.token_id, update.owner, update.operator)
+                    operator_key = OperatorKey.make(update.owner, update.operator, update.token_id)
                     del self.data.operators[operator_key]
 
     @sp.entry_point
@@ -191,7 +191,7 @@ class BaseFA2(sp.Contract):
         responses = sp.local("responses", sp.set_type_expr(sp.list([]),BalanceOf.get_response_type()))
         sp.for request in balance_of_request.requests:
             sp.verify(self.data.token_metadata.contains(request.token_id), message = FA2ErrorMessage.TOKEN_UNDEFINED)
-            responses.value.push(sp.record(request = request, balance = self.data.ledger.get(LedgerKey.make(request.token_id, request.owner),0)))
+            responses.value.push(sp.record(request = request, balance = self.data.ledger.get(LedgerKey.make(request.owner, request.token_id),0)))
             
         sp.transfer(responses.value, sp.mutez(0), balance_of_request.callback)
 
@@ -228,7 +228,7 @@ class AdministrableFA2(BaseFA2):
         If no token metadata is set for a given ID the sender will become admin of that token automatically"""
         sp.set_type(token_metadata_list, TokenMetadata.get_batch_type())
         sp.for token_metadata in token_metadata_list:
-            administrator_ledger_key = LedgerKey.make(token_metadata.token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, token_metadata.token_id)
             sp.if self.data.token_metadata.contains(token_metadata.token_id):
                 sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             sp.else:
@@ -238,14 +238,12 @@ class AdministrableFA2(BaseFA2):
             self.data.token_metadata[token_metadata.token_id] = token_metadata
     
     @sp.entry_point
-    def propose_administrator(self, token_id, proposed_administrator):
+    def propose_administrator(self, proposed_administrator_ledger_key):
         """This kicks off the adding of a new administrator for a specific token. First you propose and then the proposed admin 
         can set him/herself with the set_administrator endpoint"""
-        sp.set_type(token_id, sp.TNat)
-        sp.set_type(proposed_administrator, sp.TAddress)
+        sp.set_type(proposed_administrator_ledger_key, LedgerKey.get_type())
 
-        administrator_ledger_key = LedgerKey.make(token_id, sp.sender)
-        proposed_administrator_ledger_key = LedgerKey.make(token_id, proposed_administrator)
+        administrator_ledger_key = LedgerKey.make(sp.sender, proposed_administrator_ledger_key.token_id)
 
         sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
         self.data.administrators[proposed_administrator_ledger_key] = AdministratorState.IS_PROPOSED_ADMIN
@@ -255,22 +253,20 @@ class AdministrableFA2(BaseFA2):
         """Only a proposed admin can call this entrypoint. If the sender is correct the new admin is set"""
         sp.set_type(token_id, sp.TNat)
 
-        administrator_ledger_key = LedgerKey.make(token_id, sp.sender)
+        administrator_ledger_key = LedgerKey.make(sp.sender, token_id)
 
         sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_PROPOSED_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
         self.data.administrators[administrator_ledger_key] = AdministratorState.IS_ADMIN
     
     @sp.entry_point
-    def remove_administrator(self, token_id, administrator_to_remove):
+    def remove_administrator(self, administrator_to_remove_ledger_key):
         """This removes a administrator entry entirely from the map"""
-        sp.set_type(token_id, sp.TNat)
-        sp.set_type(administrator_to_remove, sp.TAddress)
-
-        administrator_ledger_key = LedgerKey.make(token_id, sp.sender)
-        administrator_to_remove_key = LedgerKey.make(token_id, administrator_to_remove)
+        sp.set_type(administrator_to_remove_ledger_key, LedgerKey.get_type())
+        
+        administrator_ledger_key = LedgerKey.make(sp.sender, administrator_to_remove_ledger_key.token_id)
 
         sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
-        del self.data.administrators[administrator_to_remove_key]
+        del self.data.administrators[administrator_to_remove_ledger_key]
     
 class Contact:
     def get_type():
@@ -344,7 +340,7 @@ class CMTAFA2(AdministrableFA2):
 
         sp.for token_id in token_ids:
             sp.verify((~self.data.token_context.contains(token_id)), message = CMTAFA2ErrorMessage.TOKEN_EXISTS)            
-            administrator_ledger_key = LedgerKey.make(token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             self.data.token_context[token_id] = sp.record(contact=NULL_BYTES, is_paused=False, can_transfer_rule_contract=NULL_ADDRESS)
         
@@ -354,7 +350,7 @@ class CMTAFA2(AdministrableFA2):
         sp.set_type_expr(contacts, Contact.get_batch_type())
         sp.for contact in contacts:
             token_context = self.data.token_context[contact.token_id]
-            administrator_ledger_key = LedgerKey.make(contact.token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, contact.token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             token_context.contact = contact.contact
             self.data.token_context[contact.token_id] = token_context
@@ -364,7 +360,7 @@ class CMTAFA2(AdministrableFA2):
         """Allows to issue new tokens to the calling admin's address, only a token administrator can do this"""
         sp.set_type(token_amounts, TokenAmount.get_batch_type())
         sp.for token_amount in token_amounts:
-            administrator_ledger_key = LedgerKey.make(token_amount.token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, token_amount.token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             sp.verify(self.data.token_metadata.contains(token_amount.token_id), message = FA2ErrorMessage.TOKEN_UNDEFINED)
             self.data.ledger[administrator_ledger_key] = self.data.ledger.get(administrator_ledger_key, 0) + token_amount.amount
@@ -375,7 +371,7 @@ class CMTAFA2(AdministrableFA2):
         """Allows to redeem tokens on the calling admin's address, only a token administrator can do this"""
         sp.set_type(token_amounts, TokenAmount.get_batch_type())
         sp.for token_amount in token_amounts:
-            administrator_ledger_key = LedgerKey.make(token_amount.token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, token_amount.token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             sp.verify(self.data.ledger[administrator_ledger_key]>=token_amount.amount, message = FA2ErrorMessage.INSUFFICIENT_BALANCE)
             self.data.ledger[administrator_ledger_key] = sp.as_nat(self.data.ledger.get(administrator_ledger_key, 0) - token_amount.amount)
@@ -389,11 +385,11 @@ class CMTAFA2(AdministrableFA2):
         """Allows to reassing tokens on the calling admin's address, only a token administrator can do this"""
         sp.set_type(reassignments, Reassignment.get_batch_type())
         sp.for reassignment in reassignments:
-            administrator_ledger_key = LedgerKey.make(reassignment.token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, reassignment.token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             sp.verify(reassignment.original_holder != reassignment.replacement_holder, message = CMTAFA2ErrorMessage.SAME_REASSIGN)
-            original_holder_ledger_key = LedgerKey.make(reassignment.token_id, reassignment.original_holder)
-            replacement_holder_ledger_key = LedgerKey.make(reassignment.token_id, reassignment.replacement_holder)
+            original_holder_ledger_key = LedgerKey.make(reassignment.original_holder, reassignment.token_id)
+            replacement_holder_ledger_key = LedgerKey.make(reassignment.replacement_holder, reassignment.token_id)
             sp.verify(self.data.ledger[original_holder_ledger_key]>sp.nat(0), message = FA2ErrorMessage.INSUFFICIENT_BALANCE)
             self.data.ledger[replacement_holder_ledger_key] = self.data.ledger[original_holder_ledger_key]
             del self.data.ledger[original_holder_ledger_key]
@@ -403,10 +399,10 @@ class CMTAFA2(AdministrableFA2):
         """Allows to destroy tokens on the calling admin's address, only a token administrator can do this"""
         sp.set_type(destructions, Destruction.get_batch_type())
         sp.for destruction in destructions:
-            administrator_ledger_key = LedgerKey.make(destruction.token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, destruction.token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             sp.for holder in destruction.holders:
-                holder_ledger_key = LedgerKey.make(destruction.token_id, holder)
+                holder_ledger_key = LedgerKey.make(holder, destruction.token_id)
                 sp.verify(self.data.ledger[holder_ledger_key]>sp.nat(0), message = FA2ErrorMessage.INSUFFICIENT_BALANCE)
                 self.data.ledger[administrator_ledger_key] = self.data.ledger[holder_ledger_key]
                 del self.data.ledger[holder_ledger_key]
@@ -416,7 +412,7 @@ class CMTAFA2(AdministrableFA2):
         """Allows to pause tokens, only a token administrator can do this"""
         sp.set_type(token_ids, sp.TList(sp.TNat))
         sp.for token_id in token_ids:
-            administrator_ledger_key = LedgerKey.make(token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             token_context = self.data.token_context[token_id]
             token_context.is_paused = True
@@ -427,7 +423,7 @@ class CMTAFA2(AdministrableFA2):
         """Allows to unpause tokens, only a token administrator can do this"""
         sp.set_type(token_ids, sp.TList(sp.TNat))
         sp.for token_id in token_ids:
-            administrator_ledger_key = LedgerKey.make(token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             token_context = self.data.token_context[token_id]
             token_context.is_paused = False
@@ -438,7 +434,7 @@ class CMTAFA2(AdministrableFA2):
         """Allows to specify the rules contract for a specific token, only a token administrator can do this"""
         sp.set_type(rules, Rule.get_batch_type())
         sp.for rule in rules:
-            administrator_ledger_key = LedgerKey.make(rule.token_id, sp.sender)
+            administrator_ledger_key = LedgerKey.make(sp.sender, rule.token_id)
             sp.verify(self.data.administrators.get(administrator_ledger_key, sp.nat(0))==AdministratorState.IS_ADMIN, message = AdministrableErrorMessage.NOT_ADMIN)
             self.data.token_context[rule.token_id].can_transfer_rule_contract = rule.rule_contract
     # Owner entrypoints
@@ -467,8 +463,8 @@ class CMTAFA2(AdministrableFA2):
                 token_context
                 # TODO rule
                 sp.if (tx.amount > sp.nat(0)):
-                    from_user = LedgerKey.make(tx.token_id, transfer.from_)
-                    to_user = LedgerKey.make(tx.token_id, tx.to_)
+                    from_user = LedgerKey.make(transfer.from_, tx.token_id)
+                    to_user = LedgerKey.make(tx.to_, tx.token_id)
                     sp.verify((self.data.ledger[from_user] >= tx.amount), message = FA2ErrorMessage.INSUFFICIENT_BALANCE)
                     self.data.ledger[from_user] = sp.as_nat(self.data.ledger[from_user] - tx.amount)
                     self.data.ledger[to_user] = self.data.ledger.get(to_user, 0) + tx.amount
@@ -522,7 +518,7 @@ def test():
     ownerships = [sp.record(token_id=sp.nat(0), owner=alice.address),sp.record(token_id=sp.nat(1), proposed_administrator=bob.address),sp.record(token_id=sp.nat(2), owner=dan.address)]
     
     scenario.p("Not admin trying to propose new owner")
-    scenario += cmta_fa2_contract.propose_administrator(sp.record(token_id=sp.nat(0), proposed_administrator=alice.address)).run(sender=alice, valid=False)
+    scenario += cmta_fa2_contract.propose_administrator(LedgerKey.make(alice.address, sp.nat(0))).run(sender=alice, valid=False)
     
     scenario.p("Not admin trying to transfer directly")
     scenario += cmta_fa2_contract.set_administrator(sp.nat(0)).run(sender=bob, valid=False)
@@ -531,9 +527,9 @@ def test():
     scenario += cmta_fa2_contract.set_administrator(sp.nat(0)).run(sender=administrator, valid=False)
     
     scenario.p("Correct admin trying to propose transfer")
-    scenario += cmta_fa2_contract.propose_administrator(sp.record(token_id=sp.nat(0), proposed_administrator=alice.address)).run(sender=administrator, valid=True)
-    scenario += cmta_fa2_contract.propose_administrator(sp.record(token_id=sp.nat(1), proposed_administrator=bob.address)).run(sender=administrator, valid=True)
-    scenario += cmta_fa2_contract.propose_administrator(sp.record(token_id=sp.nat(2), proposed_administrator=dan.address)).run(sender=administrator, valid=True)
+    scenario += cmta_fa2_contract.propose_administrator(LedgerKey.make(alice.address, sp.nat(0))).run(sender=administrator, valid=True)
+    scenario += cmta_fa2_contract.propose_administrator(LedgerKey.make(bob.address, sp.nat(1))).run(sender=administrator, valid=True)
+    scenario += cmta_fa2_contract.propose_administrator(LedgerKey.make(dan.address, sp.nat(2))).run(sender=administrator, valid=True)
     
     scenario.p("Correct admin (but not proposed) trying to transfer")
     scenario += cmta_fa2_contract.set_administrator(sp.nat(0)).run(sender=administrator, valid=False)    
@@ -544,14 +540,14 @@ def test():
     scenario += cmta_fa2_contract.set_administrator(sp.nat(2)).run(sender=dan, valid=True)
     
     scenario.p("Non Admin deletes rights")
-    scenario += cmta_fa2_contract.remove_administrator(sp.record(token_id=sp.nat(0), administrator_to_remove=administrator.address)).run(sender=dan, valid=False)
-    scenario += cmta_fa2_contract.remove_administrator(sp.record(token_id=sp.nat(1), administrator_to_remove=administrator.address)).run(sender=alice, valid=False)
-    scenario += cmta_fa2_contract.remove_administrator(sp.record(token_id=sp.nat(2), administrator_to_remove=administrator.address)).run(sender=bob, valid=False)
+    scenario += cmta_fa2_contract.remove_administrator(LedgerKey.make(administrator.address, sp.nat(0))).run(sender=dan, valid=False)
+    scenario += cmta_fa2_contract.remove_administrator(LedgerKey.make(administrator.address, sp.nat(1))).run(sender=alice, valid=False)
+    scenario += cmta_fa2_contract.remove_administrator(LedgerKey.make(administrator.address, sp.nat(2))).run(sender=bob, valid=False)
     
     scenario.p("Admin deletes own rights")
-    scenario += cmta_fa2_contract.remove_administrator(sp.record(token_id=sp.nat(0), administrator_to_remove=administrator.address)).run(sender=alice, valid=True)
-    scenario += cmta_fa2_contract.remove_administrator(sp.record(token_id=sp.nat(1), administrator_to_remove=administrator.address)).run(sender=bob, valid=True)
-    scenario += cmta_fa2_contract.remove_administrator(sp.record(token_id=sp.nat(2), administrator_to_remove=administrator.address)).run(sender=dan, valid=True)
+    scenario += cmta_fa2_contract.remove_administrator(LedgerKey.make(administrator.address, sp.nat(0))).run(sender=alice, valid=True)
+    scenario += cmta_fa2_contract.remove_administrator(LedgerKey.make(administrator.address, sp.nat(1))).run(sender=bob, valid=True)
+    scenario += cmta_fa2_contract.remove_administrator(LedgerKey.make(administrator.address, sp.nat(2))).run(sender=dan, valid=True)
    
     scenario.h3("Setting the Contact")
     scenario.p("Correct admin but not owner trying to set contact")
@@ -588,9 +584,9 @@ def test():
     scenario += cmta_fa2_contract.issue([sp.record(token_id=sp.nat(0), amount=sp.nat(101))]).run(sender=alice, valid=True)
     scenario += cmta_fa2_contract.issue([sp.record(token_id=sp.nat(1), amount=sp.nat(101))]).run(sender=bob, valid=True)
     scenario += cmta_fa2_contract.issue([sp.record(token_id=sp.nat(2), amount=sp.nat(101))]).run(sender=dan, valid=True)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(0, alice.address)] == 201)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(1, bob.address)] == 201)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(2, dan.address)] == 201)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(alice.address, 0)] == 201)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(bob.address, 1)] == 201)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(dan.address, 2)] == 201)
     
     scenario.h3("Redemption")
     scenario.p("Correct admin but not owner trying to redeem")
@@ -606,9 +602,9 @@ def test():
     scenario += cmta_fa2_contract.redeem([sp.record(token_id=sp.nat(0), amount=sp.nat(100))]).run(sender=alice, valid=True)
     scenario += cmta_fa2_contract.redeem([sp.record(token_id=sp.nat(1), amount=sp.nat(100))]).run(sender=bob, valid=True)
     scenario += cmta_fa2_contract.redeem([sp.record(token_id=sp.nat(2), amount=sp.nat(100))]).run(sender=dan, valid=True)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(0, alice.address)] == 101)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(1, bob.address)] == 101)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(2, dan.address)] == 101)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(alice.address, 0)] == 101)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(bob.address, 1)] == 101)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(dan.address, 2)] == 101)
     
     scenario.p("Cannot redeem more than owner has")
     scenario += cmta_fa2_contract.redeem([sp.record(token_id=sp.nat(0), amount=sp.nat(201))]).run(sender=alice, valid=False)
@@ -619,9 +615,9 @@ def test():
     scenario += cmta_fa2_contract.redeem([sp.record(token_id=sp.nat(0), amount=sp.nat(101))]).run(sender=alice, valid=True)
     scenario += cmta_fa2_contract.redeem([sp.record(token_id=sp.nat(1), amount=sp.nat(101))]).run(sender=bob, valid=True)
     scenario += cmta_fa2_contract.redeem([sp.record(token_id=sp.nat(2), amount=sp.nat(101))]).run(sender=dan, valid=True)
-    scenario.verify(~cmta_fa2_contract.data.ledger.contains(LedgerKey.make(0, alice.address)))
-    scenario.verify(~cmta_fa2_contract.data.ledger.contains(LedgerKey.make(1, bob.address)))
-    scenario.verify(~cmta_fa2_contract.data.ledger.contains(LedgerKey.make(2, dan.address)))
+    scenario.verify(~cmta_fa2_contract.data.ledger.contains(LedgerKey.make(alice.address, 0)))
+    scenario.verify(~cmta_fa2_contract.data.ledger.contains(LedgerKey.make(bob.address, 1)))
+    scenario.verify(~cmta_fa2_contract.data.ledger.contains(LedgerKey.make(dan.address, 2)))
     
 
     
@@ -647,9 +643,9 @@ def test():
     scenario += cmta_fa2_contract.reassign([sp.record(token_id=sp.nat(1), original_holder=bob.address, replacement_holder=alice.address)]).run(sender=bob, valid=True)
     scenario += cmta_fa2_contract.reassign([sp.record(token_id=sp.nat(2), original_holder=dan.address, replacement_holder=alice.address)]).run(sender=dan, valid=True)
 
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(0, alice.address)] == 50)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(1, alice.address)] == 47)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(2, alice.address)] == 39)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(alice.address, 0)] == 50)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(alice.address, 1)] == 47)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(alice.address, 2)] == 39)
     
     scenario.p("Correct owner reassigning non existings balances")
     scenario += cmta_fa2_contract.reassign([sp.record(token_id=sp.nat(1), original_holder=dan.address, replacement_holder=alice.address)]).run(sender=bob, valid=False)
@@ -673,9 +669,9 @@ def test():
     scenario += cmta_fa2_contract.destroy([sp.record(token_id=sp.nat(1), holders=[alice.address])]).run(sender=bob, valid=True)
     scenario += cmta_fa2_contract.destroy([sp.record(token_id=sp.nat(2), holders=[alice.address])]).run(sender=dan, valid=True)
 
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(0, alice.address)] == 50)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(1, bob.address)] == 47)
-    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(2, dan.address)] == 39)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(alice.address, 0)] == 50)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(bob.address, 1)] == 47)
+    scenario.verify(cmta_fa2_contract.data.ledger[LedgerKey.make(dan.address, 2)] == 39)
     
     scenario.p("Correct owner destroying non existings balances")
     scenario += cmta_fa2_contract.destroy([sp.record(token_id=sp.nat(1), holders=[alice.address, bob.address, dan.address])]).run(sender=bob, valid=False)
